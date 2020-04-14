@@ -1,5 +1,9 @@
+## Description
+This is a commandline utility to send and receive messages to Azure servicebus queues.
+Supports connection only via connection string.
+
 ## Download
-Download a binary here: https://github.com/jakubneubauer/azure-sb-cli/releases
+Download a Linux/Windows binary here: https://github.com/jakubneubauer/azure-sb-cli/releases
 
 ## Usage
 ```
