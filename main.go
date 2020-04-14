@@ -12,6 +12,9 @@ import (
 	"github.com/Azure/azure-service-bus-go"
 )
 
+var buildVersion = "unknown"
+var buildDate="unknown"
+
 const NullStr = "\xff"
 
 var logDebug = false
@@ -151,8 +154,9 @@ func usage() {
 	fmt.Println(`Usage: ` + os.Args[0] + ` <command> <options>
 
 Commands:
-  send - Sends messages to a queue. Reads standard input, sending each line as message, all in same session.
+  send    - Sends messages to a queue. Reads standard input, sending each line as message, all in same session.
   receive - Receives messages, outputting them to standard output, message per line.
+  -v      - Prints version info.
 
 Common options:
   -c   Connection string
@@ -167,6 +171,10 @@ Common options:
 Receive options:
   -p   Prefix every message with session id, separated with ':'
 `)
+}
+
+func printVersion() {
+    fmt.Println(os.Args[0] + " " + buildVersion + " (built " + buildDate + ")")
 }
 
 func main() {
@@ -186,6 +194,9 @@ func main() {
 	case "-h":
 		usage()
 		return
+	case "-v":
+	    printVersion()
+	    return
 	case "receive":
 		commonFlags.BoolVar(&prefixMsgWithSessionId, "p", false, "Prefix received messages with session id, separated with ':'")
 	}
