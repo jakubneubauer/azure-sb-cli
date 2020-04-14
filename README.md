@@ -1,13 +1,7 @@
-## Compile & install
-- Install go ( https://golang.org )
-- Get source code and build
-```
-cd $GOPATH
-go get -u github.com/jakubneubauer/azure-sb-cli
-cd github.com/jakubneubauer/azure-sb-cli
-go build
-```
-- Try it:
+## Download
+Download a binary here: https://github.com/jakubneubauer/azure-sb-cli/releases
+
+## Usage
 ```
 ./azure-sb-cli -h
 Usage: ./azure-sb-cli <command> <options>
