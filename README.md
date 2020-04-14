@@ -13,8 +13,9 @@ go build
 Usage: ./azure-sb-cli <command> <options>
 
 Commands:
-  send - Sends messages to a queue. Reads standard input, sending each line as message, all in same session.
+  send    - Sends messages to a queue. Reads standard input, sending each line as message, all in same session.
   receive - Receives messages, outputting them to standard output, message per line.
+  -v      - Prints version info.
 
 Common options:
   -c   Connection string
