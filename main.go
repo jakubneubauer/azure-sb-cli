@@ -5,7 +5,6 @@ import (
 	"github.com/Azure/go-amqp"
 	"log"
 	"os"
-	//    "time"
 	"bufio"
 	"context"
 	"flag"
@@ -96,8 +95,9 @@ func sendSession(ctx context.Context, q *servicebus.Queue, sessionId *string) {
 		fatal("Cannot read standard input:", err)
 	}
 }
-func receive(ctx context.Context, q *servicebus.Queue, sessionId *string) {
-	for receiveOne(ctx, q, sessionId) {
+
+func receive(ctx context.Context, q *servicebus.Queue, sessionId *string, count int) {
+	for i:= 0; (count < 0 || i < count) && receiveOne(ctx, q, sessionId); i++  {
 	}
 }
 
@@ -150,23 +150,42 @@ func receiveOneSession(ctx context.Context, q *servicebus.Queue, sessionId *stri
 	return sh.received
 }
 
+func peek(ctx context.Context, q *servicebus.Queue, count int) {
+    subject, err := q.Peek(ctx)
+	if err != nil {
+		fatal("Cannot peek:", err)
+	}
+	for i := 0; (count < 0 || i < count); i++ {
+        cursor, err := subject.Next(ctx)
+        if err != nil {
+    		if _ , ok := err.(servicebus.ErrNoMessages); ok {
+                return
+            }
+            fatal("Cannot iterate cursor:", err)
+        }
+        fmt.Println(string(cursor.Data))
+	}
+}
+
 func usage() {
 	fmt.Println(`Usage: ` + os.Args[0] + ` <command> <options>
 
 Commands:
   send    - Sends messages to a queue. Reads standard input, sending each line as message, all in same session.
   receive - Receives messages, outputting them to standard output, message per line.
+  peek    - Peeks one or more messages, outpus them to standard output.
   -v      - Prints version info.
 
 Common options:
   -c   Connection string
+  -d   (flag) Log debug info
+  -h   (flag) Show this help
+  -n   number of received or peeked messages. Defaults to one.
   -q   Queue name
-  -s   Session ID. 
+  -s   Session ID.
        If the queue is not session-enabled, do not set this option.
        If the queue is session-enabled, must be specified for receive. The 'send' works without it.
        If set to empty string for receive, will receive message from any session.
-  -h   (flag) Show this help
-  -d   (flag) Log debug info
 
 Receive options:
   -p   Prefix every message with session id, separated with ':'
@@ -182,6 +201,7 @@ func main() {
 	connStrPtr := commonFlags.String("c", "", "Connection string")
 	queueNamePtr := commonFlags.String("q", "", "Queue name")
 	sessionIdPtr := commonFlags.String("s", NullStr, "Session ID")
+	msgCountPtr := commonFlags.Int("n", 1, "Number of received/peeked messages")
 	helpPtr := commonFlags.Bool("h", false, "Show help")
 	commonFlags.BoolVar(&logDebug, "d", false, "Log debug info")
 
@@ -234,7 +254,9 @@ func main() {
 	case "send":
 		send(ctx, q, sessionIdPtr)
 	case "receive":
-		receive(ctx, q, sessionIdPtr)
+		receive(ctx, q, sessionIdPtr, *msgCountPtr)
+	case "peek":
+	    peek(ctx, q, *msgCountPtr)
 	}
 }
 
