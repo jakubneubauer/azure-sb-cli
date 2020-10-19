@@ -1,23 +1,24 @@
 package main
 
 import (
-	"fmt"
-	"github.com/Azure/go-amqp"
-	"log"
-	"os"
 	"bufio"
 	"context"
 	"flag"
+	"fmt"
 	"github.com/Azure/azure-service-bus-go"
+	"github.com/Azure/go-amqp"
+	"log"
+	"os"
 )
 
 var buildVersion = "unknown"
-var buildDate="unknown"
+var buildDate = "unknown"
 
 const NullStr = "\xff"
 
 var logDebug = false
 var prefixMsgWithSessionId = false
+var correlationId = ""
 
 type MySessionHandler struct {
 	messageSession *servicebus.MessageSession
@@ -27,7 +28,7 @@ type MySessionHandler struct {
 // Start is called when a new session is started
 func (sh *MySessionHandler) Start(ms *servicebus.MessageSession) error {
 	sh.messageSession = ms
-	debug("Begin session:", strPtroToString(ms.SessionID()))
+	debug("Begin message session:", strPtroToString(ms.SessionID()))
 	return nil
 }
 
@@ -37,7 +38,11 @@ func (sh *MySessionHandler) Handle(ctx context.Context, msg *servicebus.Message)
 		fmt.Print(*msg.SessionID + ":")
 	}
 	fmt.Println(string(msg.Data))
+
+	// If we wouldn't close the message session here, the call of queueSession.receiveOne would be blocked
+	// and we would receive another message during it. It would be different way of using the servicebus API.
 	if sh.messageSession != nil {
+		debug("Closing message session: " + strPtroToString(sh.messageSession.SessionID()))
 		sh.messageSession.Close()
 	}
 	sh.received = true
@@ -47,7 +52,7 @@ func (sh *MySessionHandler) Handle(ctx context.Context, msg *servicebus.Message)
 // End is called when the message session is closed. Service Bus will not automatically end your message session. Be
 // sure to know when to terminate your own session.
 func (sh *MySessionHandler) End() {
-	debug("End session:", strPtroToString(sh.messageSession.SessionID()))
+	debug("End message session:", strPtroToString(sh.messageSession.SessionID()))
 }
 
 func send(ctx context.Context, q *servicebus.Queue, sessionId *string) {
@@ -64,7 +69,7 @@ func send(ctx context.Context, q *servicebus.Queue, sessionId *string) {
 func sendNoSession(ctx context.Context, q *servicebus.Queue) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
-		err := q.Send(ctx, servicebus.NewMessageFromString(scanner.Text()))
+		err := q.Send(ctx, createMsgFromString(scanner.Text()))
 		if err != nil {
 			fatal("Cannot send message:", err)
 		}
@@ -85,8 +90,7 @@ func sendSession(ctx context.Context, q *servicebus.Queue, sessionId *string) {
 	}()
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
-		//err := q.Send(ctx, servicebus.NewMessageFromString(scanner.Text()))
-		err := session.Send(ctx, servicebus.NewMessageFromString(scanner.Text()))
+		err := session.Send(ctx, createMsgFromString(scanner.Text()))
 		if err != nil {
 			fatal("Cannot send message:", err)
 		}
@@ -97,7 +101,11 @@ func sendSession(ctx context.Context, q *servicebus.Queue, sessionId *string) {
 }
 
 func receive(ctx context.Context, q *servicebus.Queue, sessionId *string, count int) {
-	for i:= 0; (count < 0 || i < count) && receiveOne(ctx, q, sessionId); i++  {
+	if sessionId != nil && *sessionId != NullStr && *sessionId != "" {
+		receiveMoreSession(ctx, q, sessionId, count)
+	} else {
+		for i := 0; (count < 0 || i < count) && receiveOne(ctx, q, sessionId); i++ {
+		}
 	}
 }
 
@@ -128,16 +136,16 @@ func receiveOneNoSession(ctx context.Context, q *servicebus.Queue) bool {
 }
 
 func receiveOneSession(ctx context.Context, q *servicebus.Queue, sessionId *string) bool {
-	debug("Opening session", strPtroToString(sessionId))
-	session := q.NewSession(sessionId)
+	debug("Opening queue session", strPtroToString(sessionId))
+	queueSession := q.NewSession(sessionId)
 	defer func() {
-		debug("Closing session", strPtroToString(sessionId))
-		if err := session.Close(ctx); err != nil {
-			debug("Cannot close session:", err)
+		debug("Closing queue session", strPtroToString(sessionId))
+		if err := queueSession.Close(ctx); err != nil {
+			debug("Cannot close queue session:", err)
 		}
 	}()
 	sh := new(MySessionHandler)
-	err := session.ReceiveOne(ctx, sh)
+	err := queueSession.ReceiveOne(ctx, sh)
 	if err != nil {
 		if amqpErr, ok := err.(*amqp.Error); ok {
 			if amqpErr.Condition == "com.microsoft:timeout" {
@@ -150,20 +158,45 @@ func receiveOneSession(ctx context.Context, q *servicebus.Queue, sessionId *stri
 	return sh.received
 }
 
+func receiveMoreSession(ctx context.Context, q *servicebus.Queue, sessionId *string, count int) bool {
+	debug("Opening queue session", strPtroToString(sessionId))
+	queueSession := q.NewSession(sessionId)
+	defer func() {
+		debug("Closing queue session", strPtroToString(sessionId))
+		if err := queueSession.Close(ctx); err != nil {
+			debug("Cannot close queue session:", err)
+		}
+	}()
+	sh := new(MySessionHandler)
+	for i := 0; count < 0 || i < count; i++ {
+		err := queueSession.ReceiveOne(ctx, sh)
+		if err != nil {
+			if amqpErr, ok := err.(*amqp.Error); ok {
+				if amqpErr.Condition == "com.microsoft:timeout" {
+					debug("Timeout receiving message", err)
+					return true
+				}
+			}
+			fatal("Cannot receive:", err)
+		}
+	}
+	return sh.received
+}
+
 func peek(ctx context.Context, q *servicebus.Queue, count int) {
-    subject, err := q.Peek(ctx)
+	subject, err := q.Peek(ctx)
 	if err != nil {
 		fatal("Cannot peek:", err)
 	}
-	for i := 0; (count < 0 || i < count); i++ {
-        cursor, err := subject.Next(ctx)
-        if err != nil {
-    		if _ , ok := err.(servicebus.ErrNoMessages); ok {
-                return
-            }
-            fatal("Cannot iterate cursor:", err)
-        }
-        fmt.Println(string(cursor.Data))
+	for i := 0; count < 0 || i < count; i++ {
+		cursor, err := subject.Next(ctx)
+		if err != nil {
+			if _, ok := err.(servicebus.ErrNoMessages); ok {
+				return
+			}
+			fatal("Cannot iterate cursor:", err)
+		}
+		fmt.Println(string(cursor.Data))
 	}
 }
 
@@ -189,11 +222,13 @@ Common options:
 
 Receive options:
   -p   Prefix every message with session id, separated with ':'
+Send option:
+  -i   Correlation ID for sent messages
 `)
 }
 
 func printVersion() {
-    fmt.Println(os.Args[0] + " " + buildVersion + " (built " + buildDate + ")")
+	fmt.Println(os.Args[0] + " " + buildVersion + " (built " + buildDate + ")")
 }
 
 func main() {
@@ -215,10 +250,12 @@ func main() {
 		usage()
 		return
 	case "-v":
-	    printVersion()
-	    return
+		printVersion()
+		return
 	case "receive":
 		commonFlags.BoolVar(&prefixMsgWithSessionId, "p", false, "Prefix received messages with session id, separated with ':'")
+	case "send":
+		commonFlags.StringVar(&correlationId, "i", "", "Correlation ID")
 	}
 
 	commonFlags.Parse(os.Args[2:])
@@ -256,7 +293,7 @@ func main() {
 	case "receive":
 		receive(ctx, q, sessionIdPtr, *msgCountPtr)
 	case "peek":
-	    peek(ctx, q, *msgCountPtr)
+		peek(ctx, q, *msgCountPtr)
 	}
 }
 
@@ -276,4 +313,12 @@ func debug(msg string, args ...interface{}) {
 
 func fatal(msg string, args ...interface{}) {
 	log.Fatal(append([]interface{}{"ERROR: " + msg}, args...)...)
+}
+
+func createMsgFromString(s string) *servicebus.Message {
+	msg := servicebus.NewMessageFromString(s)
+	if correlationId != "" {
+		msg.CorrelationID = correlationId
+	}
+	return msg
 }

@@ -29,4 +29,6 @@ Common options:
 
 Receive options:
   -p   Prefix every message with session id, separated with ':'
+Send option:
+  -i   Correlation ID for sent messages
 ```

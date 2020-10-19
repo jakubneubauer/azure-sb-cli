@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="0.3-preview"
+VERSION="0.4-preview"
 DATE=`date -u '+%Y-%m-%d_%H:%M:%S'`
 
 build() {
