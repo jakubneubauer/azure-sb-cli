@@ -32,7 +32,7 @@ Hello world!
 ### Communicating with queue using sessions
 ```shell
 
-# Connection string and session-less queue name - variables used in the
+# Connection string and session-enabled queue name - variables used in the
 # rest of the example
 $ CONN_STR="*** YOUR CONNECTION STRING ***"
 $ QUEUE_NAME = "your queue name"
