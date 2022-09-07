@@ -3,10 +3,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"github.com/Azure/azure-service-bus-go"
-	"github.com/Azure/go-amqp"
+	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	"log"
 	"os"
 )
@@ -20,77 +20,28 @@ var logDebug = false
 var prefixMsgWithSessionId = false
 var correlationId = ""
 
-type MySessionHandler struct {
-	messageSession *servicebus.MessageSession
-	received       bool
-}
-
-// Start is called when a new session is started
-func (sh *MySessionHandler) Start(ms *servicebus.MessageSession) error {
-	sh.messageSession = ms
-	debug("Begin message session:", strPtroToString(ms.SessionID()))
-	return nil
-}
-
-// Handle is called when a new session message is received
-func (sh *MySessionHandler) Handle(ctx context.Context, msg *servicebus.Message) error {
-	if msg.SessionID != nil && prefixMsgWithSessionId {
-		fmt.Print(*msg.SessionID + ":")
+func send(ctx context.Context, client *azservicebus.Client, sessionId *string, queueName *string) {
+	if *sessionId == "" {
+		sessionId = nil
 	}
-	fmt.Println(string(msg.Data))
-
-	// If we wouldn't close the message session here, the call of queueSession.receiveOne would be blocked
-	// and we would receive another message during it. It would be different way of using the servicebus API.
-	if sh.messageSession != nil {
-		debug("Closing message session: " + strPtroToString(sh.messageSession.SessionID()))
-		sh.messageSession.Close()
+	debug("Opening sender")
+	sender, err := client.NewSender(*queueName, nil)
+	if err != nil {
+		fatal("Cannot create sender:", err)
 	}
-	sh.received = true
-	return msg.Complete(ctx)
-}
-
-// End is called when the message session is closed. Service Bus will not automatically end your message session. Be
-// sure to know when to terminate your own session.
-func (sh *MySessionHandler) End() {
-	debug("End message session:", strPtroToString(sh.messageSession.SessionID()))
-}
-
-func send(ctx context.Context, q *servicebus.Queue, sessionId *string) {
-	if *sessionId == NullStr {
-		sendNoSession(ctx, q)
-	} else {
-		if *sessionId == "" {
-			sessionId = nil
-		}
-		sendSession(ctx, q, sessionId)
-	}
-}
-
-func sendNoSession(ctx context.Context, q *servicebus.Queue) {
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		err := q.Send(ctx, createMsgFromString(scanner.Text()))
-		if err != nil {
-			fatal("Cannot send message:", err)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		fatal("Cannot read standard input:", err)
-	}
-}
-
-func sendSession(ctx context.Context, q *servicebus.Queue, sessionId *string) {
-	debug("Opening session", strPtroToString(sessionId))
-	session := q.NewSession(sessionId)
 	defer func() {
-		debug("Closing session:", strPtroToString(sessionId))
-		if err := session.Close(ctx); err != nil {
-			debug("Cannot close session:", err)
-		}
+		debug("Closing sender")
+		sender.Close(ctx)
 	}()
+
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
-		err := session.Send(ctx, createMsgFromString(scanner.Text()))
+		msg := createMsgFromString(scanner.Text())
+		if sessionId != nil && *sessionId != NullStr {
+			msg.SessionID = sessionId
+		}
+		debug("Sending message")
+		err := sender.SendMessage(ctx, msg, nil)
 		if err != nil {
 			fatal("Cannot send message:", err)
 		}
@@ -100,103 +51,147 @@ func sendSession(ctx context.Context, q *servicebus.Queue, sessionId *string) {
 	}
 }
 
-func receive(ctx context.Context, q *servicebus.Queue, sessionId *string, count int) {
+func receive(ctx context.Context, client *azservicebus.Client, sessionId *string, count int, queueName *string) {
 	if sessionId != nil && *sessionId != NullStr && *sessionId != "" {
-		receiveMoreSession(ctx, q, sessionId, count)
+		receiveMoreSession(ctx, client, sessionId, queueName, count)
 	} else {
-		for i := 0; (count < 0 || i < count) && receiveOne(ctx, q, sessionId); i++ {
+		for i := 0; (count < 0 || i < count) && receiveOne(ctx, client, sessionId, queueName); i++ {
 		}
 	}
 }
 
-func receiveOne(ctx context.Context, q *servicebus.Queue, sessionId *string) bool {
+func receiveOne(ctx context.Context, client *azservicebus.Client, sessionId *string, queueName *string) bool {
 	if *sessionId == NullStr {
-		return receiveOneNoSession(ctx, q)
+		return receiveOneNoSession(ctx, client, queueName)
 	} else {
 		if *sessionId == "" {
 			sessionId = nil
 		}
-		return receiveOneSession(ctx, q, sessionId)
+		return receiveMoreSession(ctx, client, sessionId, queueName, 1)
 	}
 }
 
-func receiveOneNoSession(ctx context.Context, q *servicebus.Queue) bool {
-	sh := new(MySessionHandler)
-	err := q.ReceiveOne(ctx, sh)
-	if err != nil {
-		if amqpErr, ok := err.(*amqp.Error); ok {
-			if amqpErr.Condition == "com.microsoft:timeout" {
-				debug("Timeout receiving message", err)
-				return true
-			}
-		}
-		fatal("Cannot receive:", err)
-	}
-	return sh.received
-}
-
-func receiveOneSession(ctx context.Context, q *servicebus.Queue, sessionId *string) bool {
-	debug("Opening queue session", strPtroToString(sessionId))
-	queueSession := q.NewSession(sessionId)
+func receiveOneNoSession(ctx context.Context, client *azservicebus.Client, queueName *string) bool {
+	debug("Opening receiver")
+	receiver, err := client.NewReceiverForQueue(
+		*queueName,
+		nil,
+	)
 	defer func() {
-		debug("Closing queue session", strPtroToString(sessionId))
-		if err := queueSession.Close(ctx); err != nil {
-			debug("Cannot close queue session:", err)
-		}
+		debug("Closing receiver")
+		receiver.Close(ctx)
 	}()
-	sh := new(MySessionHandler)
-	err := queueSession.ReceiveOne(ctx, sh)
-	if err != nil {
-		if amqpErr, ok := err.(*amqp.Error); ok {
-			if amqpErr.Condition == "com.microsoft:timeout" {
-				debug("Timeout receiving message", err)
-				return true
-			}
-		}
-		fatal("Cannot receive:", err)
-	}
-	return sh.received
-}
 
-func receiveMoreSession(ctx context.Context, q *servicebus.Queue, sessionId *string, count int) bool {
-	debug("Opening queue session", strPtroToString(sessionId))
-	queueSession := q.NewSession(sessionId)
-	defer func() {
-		debug("Closing queue session", strPtroToString(sessionId))
-		if err := queueSession.Close(ctx); err != nil {
-			debug("Cannot close queue session:", err)
+	if err != nil {
+		fatal("Cannot create receiver:", err)
+	}
+
+	messages, err := receiver.ReceiveMessages(ctx, 1, nil)
+
+	for _, msg := range messages {
+		if msg.SessionID != nil && prefixMsgWithSessionId {
+			fmt.Print(*msg.SessionID + ":")
 		}
-	}()
-	sh := new(MySessionHandler)
-	for i := 0; count < 0 || i < count; i++ {
-		err := queueSession.ReceiveOne(ctx, sh)
+		fmt.Println(string(msg.Body))
+
+		err = receiver.CompleteMessage(ctx, msg, nil)
+
 		if err != nil {
-			if amqpErr, ok := err.(*amqp.Error); ok {
-				if amqpErr.Condition == "com.microsoft:timeout" {
-					debug("Timeout receiving message", err)
-					return true
+			var sbErr *azservicebus.Error
+
+			if errors.As(err, &sbErr) && sbErr.Code == azservicebus.CodeLockLost {
+				// The message lock has expired. This isn't fatal for the client, but it does mean
+				// that this message can be received by another Receiver (or potentially this one!).
+				debug("Message lock expired\n")
+				continue
+			}
+
+			fatal("Cannot receive message", err)
+		}
+		return true
+	}
+	return false
+}
+
+func receiveMoreSession(ctx context.Context, client *azservicebus.Client, sessionId *string, queueName *string, count int) bool {
+	var receiver *azservicebus.SessionReceiver
+	var err error
+
+	debug("Opening queue session", strPtroToString(sessionId))
+	if sessionId != nil && *sessionId != "" {
+		receiver, err = client.AcceptSessionForQueue(ctx, *queueName, *sessionId, nil)
+		defer func() {
+			debug("Closing queue session", strPtroToString(sessionId))
+			receiver.Close(ctx)
+		}()
+	} else {
+		receiver, err = client.AcceptNextSessionForQueue(ctx, *queueName, nil)
+		defer func() {
+			debug("Closing queue session", strPtroToString(sessionId))
+			receiver.Close(ctx)
+		}()
+	}
+	if err != nil {
+		fatal("Cannot open session:", err)
+	}
+
+	for i := 0; count < 0 || i < count; {
+		remains := 100
+		if count > 0 {
+			remains = count - i
+		}
+		debug("Calling receive", remains)
+		messages, err := receiver.ReceiveMessages(ctx, remains, nil)
+
+		for _, msg := range messages {
+			if msg.SessionID != nil && prefixMsgWithSessionId {
+				fmt.Print(*msg.SessionID + ":")
+			}
+			fmt.Println(string(msg.Body))
+
+			err = receiver.CompleteMessage(ctx, msg, nil)
+
+			if err != nil {
+				var sbErr *azservicebus.Error
+
+				if errors.As(err, &sbErr) && sbErr.Code == azservicebus.CodeLockLost {
+					// The message lock has expired. This isn't fatal for the client, but it does mean
+					// that this message can be received by another Receiver (or potentially this one!).
+					debug("Message lock expired\n")
+					continue
 				}
+
+				fatal("Cannot receive message", err)
 			}
-			fatal("Cannot receive:", err)
+			i++
 		}
 	}
-	return sh.received
+	return true
 }
 
-func peek(ctx context.Context, q *servicebus.Queue, count int) {
-	subject, err := q.Peek(ctx)
+func peek(ctx context.Context, client *azservicebus.Client, queueName *string, count int) {
+	receiver, err := client.NewReceiverForQueue(
+		*queueName,
+		nil,
+	)
 	if err != nil {
-		fatal("Cannot peek:", err)
+		fatal("Cannot create receiver:", err)
 	}
-	for i := 0; count < 0 || i < count; i++ {
-		cursor, err := subject.Next(ctx)
+	defer receiver.Close(ctx)
+
+	for i := 0; count < 0 || i < count; {
+		messages, err := receiver.PeekMessages(ctx, 1, nil)
 		if err != nil {
-			if _, ok := err.(servicebus.ErrNoMessages); ok {
-				return
-			}
-			fatal("Cannot iterate cursor:", err)
+			fatal("Cannot peek message:", err)
 		}
-		fmt.Println(string(cursor.Data))
+
+		for _, msg := range messages {
+			if msg.SessionID != nil && prefixMsgWithSessionId {
+				fmt.Print(*msg.SessionID + ":")
+			}
+			fmt.Println(string(msg.Body))
+			i++
+		}
 	}
 }
 
@@ -217,11 +212,11 @@ Common options:
   -q   Queue name
   -s   Session ID.
        If the queue is not session-enabled, do not set this option.
-       If the queue is session-enabled, must be specified for receive. The 'send' works without it.
+       If the queue is session-enabled, must be specified.
        If set to empty string for receive, will receive message from any session.
 
 Receive options:
-  -p   Prefix every message with session id, separated with ':'
+  -p   Prefix every message with session id, separated with ':'. Useful if receiving all sessions messages.
 Send option:
   -i   Correlation ID for sent messages
 `)
@@ -276,24 +271,19 @@ func main() {
 	//defer cancel()
 	ctx := context.Background()
 
-	ns, err := servicebus.NewNamespace(servicebus.NamespaceWithConnectionString(*connStrPtr))
+	client, err := azservicebus.NewClientFromConnectionString(*connStrPtr, nil)
+
 	if err != nil {
 		fatal("Cannot connect to servicebus:", err)
 	}
 
-	// Create a client to communicate with the queue.
-	q, err := ns.NewQueue(*queueNamePtr)
-	if err != nil {
-		fatal("Cannot connect to queue:", err)
-	}
-
 	switch os.Args[1] {
 	case "send":
-		send(ctx, q, sessionIdPtr)
+		send(ctx, client, sessionIdPtr, queueNamePtr)
 	case "receive":
-		receive(ctx, q, sessionIdPtr, *msgCountPtr)
+		receive(ctx, client, sessionIdPtr, *msgCountPtr, queueNamePtr)
 	case "peek":
-		peek(ctx, q, *msgCountPtr)
+		peek(ctx, client, queueNamePtr, *msgCountPtr)
 	}
 }
 
@@ -315,10 +305,12 @@ func fatal(msg string, args ...interface{}) {
 	log.Fatal(append([]interface{}{"ERROR: " + msg}, args...)...)
 }
 
-func createMsgFromString(s string) *servicebus.Message {
-	msg := servicebus.NewMessageFromString(s)
+func createMsgFromString(s string) *azservicebus.Message {
+	msg := &azservicebus.Message{
+		Body: []byte(s),
+	}
 	if correlationId != "" {
-		msg.CorrelationID = correlationId
+		msg.CorrelationID = &correlationId
 	}
 	return msg
 }
