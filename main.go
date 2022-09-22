@@ -9,6 +9,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	"log"
 	"os"
+	"strings"
 )
 
 var buildVersion = "unknown"
@@ -18,6 +19,7 @@ const NullStr = "\xff"
 
 var logDebug = false
 var prefixMsgWithSessionId = false
+var prefixMsgWithMessageId = false
 var correlationId = ""
 
 func send(ctx context.Context, client *azservicebus.Client, sessionId *string, queueName *string) {
@@ -86,11 +88,20 @@ func receiveOneNoSession(ctx context.Context, client *azservicebus.Client, queue
 		fatal("Cannot create receiver:", err)
 	}
 
+	debug("Calling receive", 1)
 	messages, err := receiver.ReceiveMessages(ctx, 1, nil)
+	if err != nil {
+		fatal("Cannot receive message:", err)
+	}
+
+	debug("Received messages", len(messages))
 
 	for _, msg := range messages {
 		if msg.SessionID != nil && prefixMsgWithSessionId {
 			fmt.Print(*msg.SessionID + ":")
+		}
+		if msg.SessionID != nil && prefixMsgWithMessageId {
+			fmt.Print(msg.MessageID + ":")
 		}
 		fmt.Println(string(msg.Body))
 
@@ -117,23 +128,38 @@ func receiveMoreSession(ctx context.Context, client *azservicebus.Client, sessio
 	var receiver *azservicebus.SessionReceiver
 	var err error
 
-	debug("Opening queue session", strPtroToString(sessionId))
-	if sessionId != nil && *sessionId != "" {
-		receiver, err = client.AcceptSessionForQueue(ctx, *queueName, *sessionId, nil)
-		defer func() {
-			debug("Closing queue session", strPtroToString(sessionId))
-			receiver.Close(ctx)
-		}()
-	} else {
-		receiver, err = client.AcceptNextSessionForQueue(ctx, *queueName, nil)
-		defer func() {
-			debug("Closing queue session", strPtroToString(sessionId))
-			receiver.Close(ctx)
-		}()
+	for true {
+		if sessionId != nil && *sessionId != "" {
+			debug("Opening queue session", strPtroToString(sessionId))
+			receiver, err = client.AcceptSessionForQueue(ctx, *queueName, *sessionId, nil)
+		} else {
+			debug("Opening next available session")
+			receiver, err = client.AcceptNextSessionForQueue(ctx, *queueName, nil)
+		}
+		if err != nil {
+			// After version 1.1.0 this should be possible (see https://github.com/Azure/azure-sdk-for-go/issues/19039)
+			//var sbErr *azservicebus.Error
+			//if errors.As(err, &sbErr) && sbErr.Code == azservicebus.CodeTimeout {
+			//	// there are no sessions available. This isn't fatal - we can use the client and try
+			// 	// to AcceptNextSessionForQueue() again.
+			//	debug("No session available")
+			//	continue
+			//}
+			if strings.Contains(err.Error(), "com.microsoft:timeout") {
+				// there are no sessions available. This isn't fatal - we can use the client and try
+				// to AcceptNextSessionForQueue() again.
+				debug("No session available, trying again")
+				continue
+			}
+			fatal("Cannot open session:", err)
+		} else {
+			break
+		}
 	}
-	if err != nil {
-		fatal("Cannot open session:", err)
-	}
+	defer func() {
+		debug("Closing queue session", strPtroToString(sessionId))
+		receiver.Close(ctx)
+	}()
 
 	for i := 0; count < 0 || i < count; {
 		remains := 100
@@ -142,10 +168,14 @@ func receiveMoreSession(ctx context.Context, client *azservicebus.Client, sessio
 		}
 		debug("Calling receive", remains)
 		messages, err := receiver.ReceiveMessages(ctx, remains, nil)
+		fatal("Cannot receive messages:", err)
 
 		for _, msg := range messages {
 			if msg.SessionID != nil && prefixMsgWithSessionId {
 				fmt.Print(*msg.SessionID + ":")
+			}
+			if msg.SessionID != nil && prefixMsgWithMessageId {
+				fmt.Print(msg.MessageID + ":")
 			}
 			fmt.Println(string(msg.Body))
 
@@ -189,6 +219,9 @@ func peek(ctx context.Context, client *azservicebus.Client, queueName *string, c
 			if msg.SessionID != nil && prefixMsgWithSessionId {
 				fmt.Print(*msg.SessionID + ":")
 			}
+			if msg.SessionID != nil && prefixMsgWithMessageId {
+				fmt.Print(msg.MessageID + ":")
+			}
 			fmt.Println(string(msg.Body))
 			i++
 		}
@@ -216,7 +249,8 @@ Common options:
        If set to empty string for receive, will receive message from any session.
 
 Receive options:
-  -p   Prefix every message with session id, separated with ':'. Useful if receiving all sessions messages.
+  -ps   Prefix every message with session id, separated with ':'. Useful if receiving all sessions messages.
+  -pm   Prefix every message with message id, separated with ':'.
 Send option:
   -i   Correlation ID for sent messages
 `)
@@ -248,12 +282,17 @@ func main() {
 		printVersion()
 		return
 	case "receive":
-		commonFlags.BoolVar(&prefixMsgWithSessionId, "p", false, "Prefix received messages with session id, separated with ':'")
+		commonFlags.BoolVar(&prefixMsgWithSessionId, "ps", false, "Prefix received messages with session id, separated with ':'")
+		commonFlags.BoolVar(&prefixMsgWithMessageId, "pm", false, "Prefix received messages with message id, separated with ':'")
 	case "send":
 		commonFlags.StringVar(&correlationId, "i", "", "Correlation ID")
 	}
 
-	commonFlags.Parse(os.Args[2:])
+	err := commonFlags.Parse(os.Args[2:])
+	if err != nil {
+		usage()
+		os.Exit(2)
+	}
 
 	if *helpPtr {
 		usage()
