@@ -157,7 +157,7 @@ func receiveMoreSession(ctx context.Context, client *azservicebus.Client, sessio
 		}
 	}
 	defer func() {
-		debug("Closing queue session", strPtroToString(sessionId))
+		debug("Closing queue session", receiver.SessionID())
 		receiver.Close(ctx)
 	}()
 
@@ -168,7 +168,9 @@ func receiveMoreSession(ctx context.Context, client *azservicebus.Client, sessio
 		}
 		debug("Calling receive", remains)
 		messages, err := receiver.ReceiveMessages(ctx, remains, nil)
-		fatal("Cannot receive messages:", err)
+		if err != nil {
+			fatal("Cannot receive messages:", err)
+		}
 
 		for _, msg := range messages {
 			if msg.SessionID != nil && prefixMsgWithSessionId {
